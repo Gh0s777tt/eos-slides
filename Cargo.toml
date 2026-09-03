@@ -36,13 +36,43 @@ i-slint-backend-winit = { version = "1.17", default-features = false, features =
 [target.'cfg(all(unix, not(target_os = "redox"), not(target_os = "macos")))'.dependencies]
 i-slint-backend-winit = { version = "1.17", default-features = false, features = ["renderer-software", "x11", "wayland"], optional = true }
 
+# Windows needs `muda` — and not because we want a menu bar. In
+# i-slint-backend-winit 1.17.1 the field `WinitWindowOrNone::HasWindow.muda_adapter`
+# is declared `#[cfg(muda)]` (build.rs: `muda = all(feature = "muda", any(windows,
+# macos))`), while the pattern that destructures it at winitwindowadapter.rs:916 is
+# gated only `#[cfg(target_os = "windows")]`. `muda` is an *implicit* feature — an
+# optional dependency that is not listed in [features] — so it is off by default and
+# the two cfgs disagree. Measured before this line existed:
+#   error[E0026]: variant `WinitWindowOrNone::HasWindow` does not have a field
+#                 named `muda_adapter`
+# Turning `muda` on for Windows only makes the two cfgs agree again. It is a
+# workaround for an upstream bug, not a product decision; delete it when 1.18
+# fixes the gate.
+[target.'cfg(target_os = "windows")'.dependencies]
+i-slint-backend-winit = { version = "1.17", default-features = false, features = ["renderer-software", "muda"], optional = true }
+
+# Linux needs fontconfig at *runtime*, not at *link* time. `i-slint-common` is not
+# used by this crate's code; it is here so that cargo's feature unification applies
+# `fontconfig-dlopen` to the copy the rest of the graph already pulls in. Without
+# it a cross build from macOS dies in a transitive build script:
+#   error: failed to run custom build command for `yeslogic-fontconfig-sys v6.0.0`
+#   pkg-config has not been configured to support cross-compilation
+# The version is pinned `=1.17.1` on purpose: feature unification only happens when
+# both paths resolve to the SAME version, so a floating `1.17` that drifted to
+# 1.17.2 would silently stop applying the feature and the failure would come back
+# looking like a fontconfig problem again.
+[target.'cfg(target_os = "linux")'.dependencies]
+i-slint-common = { version = "=1.17.1", default-features = false, features = ["fontconfig-dlopen"], optional = true }
+
 [features]
 # Fail-closed: the default build carries no windowing backend, so a Redox cross
 # build cannot pick one up by accident and a CI container needs no display libs.
 # `--features host-backend` is the explicit escape that opens a real window on
 # Linux/macOS/Windows.
 default = []
-host-backend = ["dep:i-slint-backend-winit"]
+# `dep:i-slint-common` resolves to nothing on macOS, Windows and Redox — the
+# dependency is target-scoped to Linux — so this stays one feature, not two.
+host-backend = ["dep:i-slint-backend-winit", "dep:i-slint-common"]
 
 [build-dependencies]
 slint-build = "1.17"
