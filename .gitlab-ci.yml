@@ -237,12 +237,32 @@ host-gui:
   stage: package
   tags:
     - eos-heavy
+  # `needs: []` DETACHES THIS FROM STAGE ORDERING, and it is the difference between a
+  # gate and a decoration. Measured on the sibling products before this was added: the
+  # package jobs came back **skipped** — not failed, not passed. The light-tier jobs above
+  # run on shared runners that are out of quota, they die in ~0 s, and GitLab then skips
+  # every later stage. A skipped job reads exactly like a job with nothing to complain about.
+  needs: []
+  variables:
+    TMPDIR: "/Volumes/EOS-Podman/tmp"
   before_script:
+    # rustup here is Homebrew's, so cargo is NOT in ~/.cargo/bin. The meta-repository's
+    # `local-gates` job learned that as `cargo: command not found`.
+    - export PATH="$HOME/.cargo/bin:/opt/homebrew/opt/rustup/bin:/opt/homebrew/bin:$PATH"
+    - command -v cargo zig cargo-zigbuild python3 file
     # Idempotent and cheap: lets the job survive a re-imaged runner instead of
     # failing with a message about a missing std for the target.
     - rustup target add "$EOS_TARGET"
-  script:
+    # A symlink rather than CARGO_TARGET_DIR, because `release.sh` addresses the binary as
+    # `target/<triple>/release/…` and would otherwise look where the file is not. It has to
+    # go somewhere other than the default because this runner's internal disk was measured
+    # at 96-99 %% full twice on 2026-09-03 (CLAUDE.md P-16, §21.1).
+    - mkdir -p "$EOS_XBUILD" "$TMPDIR"
+    - rm -rf target dist && ln -s "$EOS_XBUILD" target
+    # The packager's own checks come first: if they stop being able to refuse anything,
+    # nothing should be packaged at all (CLAUDE.md §5.4).
     - bash packaging/release.sh --selftest
+  script:
     - bash packaging/release.sh "$EOS_TARGET" dist
   artifacts:
     name: "$CI_JOB_NAME-$CI_COMMIT_SHORT_SHA"
@@ -256,8 +276,20 @@ package-windows:
   extends: .package
   variables:
     EOS_TARGET: "x86_64-pc-windows-gnu"
+    TMPDIR: "/Volumes/EOS-Podman/tmp"
+    EOS_XBUILD: "/Volumes/EOS-Podman/xbuild/eos-slides-ci-windows"
 
+# NO LONGER EXPECTED RED. The commit that added this job said `release.sh` routed only
+# `*windows-gnu` through cargo zigbuild, so this target reached Apple's ld and failed at
+# link after the whole graph had compiled. That was measured and true. The shared template
+# has since been fixed to decide by triple (`needs_zig`, covering windows-gnu, linux-gnu
+# and linux-musl), with those cases in `--selftest` so the routing is checked without
+# waiting for a build. Measured through the packager on the sibling product eos-sheets:
+#   release: dist/eos-sheets-0.1.0-x86_64-unknown-linux-gnu.tar.gz  7665902 bytes
+#            (ELF 64-bit LSB pie executable, x86-64 ... for GNU/Linux 2.0.0, stripped)
 package-linux:
   extends: .package
   variables:
     EOS_TARGET: "x86_64-unknown-linux-gnu"
+    TMPDIR: "/Volumes/EOS-Podman/tmp"
+    EOS_XBUILD: "/Volumes/EOS-Podman/xbuild/eos-slides-ci-linux"
