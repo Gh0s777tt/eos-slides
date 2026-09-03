@@ -1,0 +1,6 @@
+name=E-OS Slides
+binary=/usr/bin/eos-slides
+icon=/ui/icons/apps/eos-slides.png
+category=Office
+description=Presentation editor for E-OS — slides, outline and full-screen show.
+author=E-OS
