@@ -29,6 +29,7 @@
 stages:
   - light
   - heavy
+  - package
 
 variables:
   CARGO_TERM_COLOR: "always"
@@ -158,3 +159,105 @@ host-gui:
         echo "FAIL: --check-backend succeeded without host-backend"
         exit 1
       fi
+
+# Downloadable, per-OS builds — roadmap PR-008.
+#
+# What these two jobs claim is narrow, and worth stating exactly: someone on
+# Windows or on Linux can fetch ONE file from a pipeline and run this
+# application without installing a Rust toolchain. The E-OS build is still
+# the real product (README, "For E-OS"); this is the same "development
+# convenience" the `host-gui` job covers, with a file attached to it.
+#
+# Why `eos-heavy` and not a shared runner. Both jobs cross-compile the whole
+# Slint graph from a cold cache — measured on the operator's Mac 2026-09-03,
+# 16m37s for Windows and 17m19s for Linux. Shared minutes for this group run
+# out with interruptions (CLAUDE.md §9), and a packaging job that cannot be
+# run is not a packaging job.
+#
+# Why a third stage rather than two more `heavy` jobs. Stages are ordered, so
+# `package` starts only after `host-gui` has shown that the winit backend
+# really constructs a window on this host. Publishing an archive that was
+# never shown to work is exactly the "a green build is not evidence" mistake
+# of CLAUDE.md §5.3.
+#
+# Why both jobs run `--selftest` before packaging anything. The two checks
+# inside release.sh — binary format via `file`, and a 1 MiB size floor — are
+# the only thing standing between a broken build and a published archive, and
+# a check nobody has seen refuse is a hypothesis, not a gate (§5.4).
+# `--selftest` hands those checks fabricated files (a text file, 2 MiB of
+# zeroes, a 512 KB stub, a file that is not there) and exits non-zero if any
+# one of them is accepted. So the job also goes red when the GATE rots, not
+# only when the build breaks.
+#
+# These jobs go red for the build too, and that was measured on this tree
+# rather than assumed. Delete the `muda` line from Cargo.toml and the Windows
+# build stops with `error[E0026]: variant WinitWindowOrNone::HasWindow does
+# not have a field named muda_adapter`. Delete the `i-slint-common` line and
+# the Linux build stops in yeslogic-fontconfig-sys 6.0.1's build script with
+# "pkg-config has not been configured to support cross-compilation". Both
+# were reproduced by removing the line, rebuilding, and putting it back.
+#
+# --------------------------------------------------------------------------
+# READ THIS BEFORE WONDERING WHY `package-linux` IS RED.
+#
+# On the macOS `eos-heavy` runner it IS red, and the cause is the packager,
+# not this product. release.sh routes only `*windows-gnu` through
+# `cargo zigbuild`; every other target falls through to a plain `cargo build`,
+# so rustc hands the link to Apple's `cc` and thence to Apple's `ld`, which
+# does not speak GNU linker flags. Measured here, after the entire dependency
+# graph had already compiled cleanly:
+#
+#   ld: unknown options: --as-needed -Bstatic -Bdynamic --eh-frame-hdr -z
+#       --gc-sections -z -z --strip-debug
+#   clang: error: linker command failed with exit code 1
+#
+# The Linux BINARY is fine. `cargo zigbuild --release --features host-backend
+# --target x86_64-unknown-linux-gnu` produced a 17 001 800 byte "ELF 64-bit
+# LSB pie executable, x86-64 ... stripped" on this same host in 17m19s. What
+# is missing is a Linux branch in release.sh, or a Linux executor on this
+# runner. release.sh is a shared template copied verbatim into every product
+# repository, so patching it here would fork it; that change belongs upstream
+# of this merge request, and this job is what makes the gap visible.
+#
+# Left able to go red rather than papered over with `allow_failure: true`,
+# which this file does not use anywhere and which CLAUDE.md §13 calls
+# decoration.
+# --------------------------------------------------------------------------
+#
+# What the runner must already have: `zig` and `cargo-zigbuild`. release.sh
+# exits **2** — "the packager could not run" — when either is missing, which
+# is deliberately a different colour of failure from exit 1, "the package is
+# wrong" (CLAUDE.md §13).
+#
+# The archives are NOT signed and the artifacts expire. Signing product
+# downloads needs a key a human generates and holds outside this repository
+# (CLAUDE.md §14, §19); nothing here should be mistaken for a release.
+.package:
+  extends: .rules-light
+  stage: package
+  tags:
+    - eos-heavy
+  before_script:
+    # Idempotent and cheap: lets the job survive a re-imaged runner instead of
+    # failing with a message about a missing std for the target.
+    - rustup target add "$EOS_TARGET"
+  script:
+    - bash packaging/release.sh --selftest
+    - bash packaging/release.sh "$EOS_TARGET" dist
+  artifacts:
+    name: "$CI_JOB_NAME-$CI_COMMIT_SHORT_SHA"
+    paths:
+      - dist/
+    # Long enough to download from a merge request, short enough that nobody
+    # starts treating a pipeline artefact as a distribution channel.
+    expire_in: 1 week
+
+package-windows:
+  extends: .package
+  variables:
+    EOS_TARGET: "x86_64-pc-windows-gnu"
+
+package-linux:
+  extends: .package
+  variables:
+    EOS_TARGET: "x86_64-unknown-linux-gnu"
